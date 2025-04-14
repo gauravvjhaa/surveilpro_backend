@@ -16,8 +16,7 @@ from werkzeug.utils import secure_filename
 import shutil
 from flask_cors import CORS
 
-# Import our custom modules
-import encryption_utils
+# Import our custom modules (remove encryption_utils)
 from sr_inference import create_sr_model, process_image, process_video
 from ocr_utils import extract_text_from_image, extract_text_with_regions
 
@@ -30,119 +29,111 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)  # Enable CORS for all routes
 
 # Configure constants
 MODEL_DIR = "model"
-KEYS_DIR = "keys"
-SERVER_PRIVATE_KEY = os.path.join(KEYS_DIR, "server_private_key.pem")
-CLIENT_PUBLIC_KEY = os.path.join(KEYS_DIR, "client_public_key.pem")
 TEMP_DIR = tempfile.gettempdir()
 
 # Ensure the model directory exists
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# Ensure encryption keys are set up
-# Replace line 44 (the encryption_utils.ensure_keys_exist line) with this error handling code:
+# Available models
+AVAILABLE_MODELS = {
+    "real-esrgan": {
+        "file": "RealESRGAN_x4plus.pth",
+        "type": "real-esrgan",
+        "display_name": "RealESRGAN",
+        "description": "Standard 4x super-resolution"
+    },
+    "real-hat-gan": {
+        "file": "Real_HAT_GAN_sharper.pth",
+        "type": "real-hat-gan",
+        "display_name": "Real HAT-GAN",
+        "description": "Transformer-based hybrid model with sharper results"
+    }
+}
 
-# Add debugging information
-import sys
-print("Python path:", sys.path)
-print("Current directory:", os.getcwd())
-print("Directory contents:", os.listdir("."))
-if os.path.exists("encryption_utils.py"):
-    print("encryption_utils.py exists in current directory")
-    
-# Try to load the keys with error handling
-try:
-    print("Attempting to call ensure_keys_exist...")
-    print("Functions in encryption_utils:", [f for f in dir(encryption_utils) if not f.startswith('_')])
-    encryption_utils.ensure_keys_exist(KEYS_DIR)
-    print("Keys setup successful")
-except AttributeError as e:
-    print(f"Function not found: {e}")
-    print("Using fallback key check implementation")
-    os.makedirs(KEYS_DIR, exist_ok=True)
-    
-    # Just check if keys exist
-    server_private_key_path = os.path.join(KEYS_DIR, "server_private_key.pem")
-    server_public_key_path = os.path.join(KEYS_DIR, "server_public_key.pem")
-    client_private_key_path = os.path.join(KEYS_DIR, "client_private_key.pem")
-    client_public_key_path = os.path.join(KEYS_DIR, "client_public_key.pem")
-    
-    # Log status of key files
-    print(f"Server private key exists: {os.path.exists(server_private_key_path)}")
-    print(f"Client public key exists: {os.path.exists(client_public_key_path)}")
+# Global model instances
+sr_models = {}
 
-# Global model instance
-sr_model = None
-
-def initialize_model():
+def initialize_models():
     """
-    Initialize the super-resolution model.
+    Initialize all super-resolution models.
     """
-    global sr_model
+    global sr_models
     
-    # Determine model path - use RealESRGAN by default
-    model_path = os.path.join(MODEL_DIR, "RealESRGAN_x4plus.pth")
-    
-    # Check if the model file exists
-    if not os.path.exists(model_path):
-        logger.warning(f"Model file not found at {model_path}. "
-                      "Please download the model file and place it in the model directory.")
+    for model_key, model_info in AVAILABLE_MODELS.items():
+        model_path = os.path.join(MODEL_DIR, model_info["file"])
         
-        # Create a placeholder model file (for development)
-        with open(model_path, 'wb') as f:
-            f.write(b'PLACEHOLDER_MODEL')
+        # Check if the model file exists
+        if not os.path.exists(model_path):
+            logger.warning(f"Model file not found at {model_path}.")
             
-        logger.warning(f"Created a placeholder model file at {model_path}")
-    
-    # Create the SR model
-    try:
-        sr_model = create_sr_model("real-esrgan", model_path)
-        logger.info("Super-resolution model initialized successfully")
-    except Exception as e:
-        logger.error(f"Error initializing super-resolution model: {e}")
-        logger.error("Using placeholder implementation")
+            # Create a placeholder model file (for development)
+            with open(model_path, 'wb') as f:
+                f.write(b'PLACEHOLDER_MODEL')
+                
+            logger.warning(f"Created a placeholder model file at {model_path}")
         
-        # Use a placeholder implementation
-        from sr_inference import SuperResolutionModel
-        
-        class PlaceholderModel(SuperResolutionModel):
-            def load_model(self):
-                logger.warning("Using placeholder model that simply resizes images")
-                self.model = None
-                
-            def preprocess(self, img):
-                return img
-                
-            def postprocess(self, output):
-                return output
-                
-            def enhance(self, img, text_hint=None):
-                # Simple 4x upscaling using OpenCV
-                h, w = img.shape[:2]
-                return cv2.resize(img, (w*4, h*4), interpolation=cv2.INTER_CUBIC)
-                
-        sr_model = PlaceholderModel(model_path)
+        # Create the SR model
+        try:
+            sr_models[model_key] = create_sr_model(model_info["type"], model_path)
+            logger.info(f"{model_info['display_name']} model initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing {model_info['display_name']} model: {e}")
+            logger.error("Using placeholder implementation")
+            
+            # Use a placeholder implementation
+            from sr_inference import SuperResolutionModel
+            
+            class PlaceholderModel(SuperResolutionModel):
+                def load_model(self):
+                    logger.warning(f"Using placeholder model for {model_info['display_name']}")
+                    self.model = None
+                    
+                def preprocess(self, img):
+                    return img
+                    
+                def postprocess(self, output):
+                    return output
+                    
+                def enhance(self, img, text_hint=None):
+                    # Simple 4x upscaling using OpenCV
+                    h, w = img.shape[:2]
+                    return cv2.resize(img, (w*4, h*4), interpolation=cv2.INTER_CUBIC)
+                    
+            sr_models[model_key] = PlaceholderModel(model_path)
 
 
-def process_encrypted_image(encrypted_data):
+def get_sr_model(model_key):
+    """Get the requested model or default to RealESRGAN"""
+    if model_key not in sr_models:
+        logger.warning(f"Model {model_key} not found, using real-esrgan")
+        return sr_models.get("real-esrgan")
+    return sr_models.get(model_key)
+
+
+def process_image_data(base64_image, model_key="real-esrgan"):
     """
-    Process an encrypted image through the pipeline.
+    Process a base64 encoded image through the pipeline.
     
     Args:
-        encrypted_data: Base64-encoded encrypted image data
+        base64_image: Base64-encoded image data
+        model_key: The model to use for enhancement
         
     Returns:
         Dictionary with processing results and enhanced image
     """
-    # Decrypt the image data
+    # Get the selected model
+    sr_model = get_sr_model(model_key)
+    
+    # Decode base64 image data
     try:
-        image_bytes = encryption_utils.decrypt_data(encrypted_data, SERVER_PRIVATE_KEY)
+        image_bytes = base64.b64decode(base64_image)
     except Exception as e:
-        logger.error(f"Decryption error: {e}")
-        return {"status": "error", "message": "Failed to decrypt image data"}
+        logger.error(f"Base64 decoding error: {e}")
+        return {"status": "error", "message": "Failed to decode base64 image data"}
     
     # Convert bytes to numpy array
     try:
@@ -169,7 +160,7 @@ def process_encrypted_image(encrypted_data):
         enhanced_image = process_image(image, sr_model, text_hint)
     except Exception as e:
         logger.error(f"Super-resolution error: {e}")
-        return {"status": "error", "message": "Failed to enhance image"}
+        return {"status": "error", "message": f"Failed to enhance image: {str(e)}"}
     
     # OCR on enhanced image
     try:
@@ -182,45 +173,51 @@ def process_encrypted_image(encrypted_data):
     # Encode the enhanced image
     _, buffer = cv2.imencode('.png', enhanced_image)
     enhanced_bytes = buffer.tobytes()
+    enhanced_base64 = base64.b64encode(enhanced_bytes).decode('utf-8')
     
     # Prepare the result dictionary
     result = {
-        "enhanced_image": enhanced_bytes,
+        "enhanced_image": enhanced_base64,
         "original_ocr": initial_ocr,
         "enhanced_ocr": final_ocr,
         "processing_info": {
-            "original_size": image.shape,
-            "enhanced_size": enhanced_image.shape,
-            "enhancement_factor": enhanced_image.shape[1] / image.shape[1]
+            "original_size": [int(x) for x in image.shape],
+            "enhanced_size": [int(x) for x in enhanced_image.shape],
+            "enhancement_factor": float(enhanced_image.shape[1] / image.shape[1]),
+            "model_used": model_key
         }
     }
     
     return result
 
 
-def process_encrypted_video(encrypted_data):
+def process_video_data(base64_video, model_key="real-esrgan"):
     """
-    Process an encrypted video through the pipeline.
+    Process a base64 encoded video through the pipeline.
     
     Args:
-        encrypted_data: Base64-encoded encrypted video data
+        base64_video: Base64-encoded video data
+        model_key: The model to use for enhancement
         
     Returns:
         Dictionary with processing results and enhanced video
     """
-    # Decrypt the video data
+    # Get the selected model
+    sr_model = get_sr_model(model_key)
+    
+    # Decode base64 video data
     try:
-        video_bytes = encryption_utils.decrypt_data(encrypted_data, SERVER_PRIVATE_KEY)
+        video_bytes = base64.b64decode(base64_video)
     except Exception as e:
-        logger.error(f"Decryption error: {e}")
-        return {"status": "error", "message": "Failed to decrypt video data"}
+        logger.error(f"Base64 decoding error: {e}")
+        return {"status": "error", "message": "Failed to decode base64 video data"}
     
     # Create temporary input and output files
     temp_input_path = os.path.join(TEMP_DIR, f"temp_input_{int(time.time())}.mp4")
     temp_output_path = os.path.join(TEMP_DIR, f"temp_output_{int(time.time())}.mp4")
     
     try:
-        # Save the decrypted video to a temp file
+        # Save the video to a temp file
         with open(temp_input_path, 'wb') as f:
             f.write(video_bytes)
         
@@ -236,16 +233,19 @@ def process_encrypted_video(encrypted_data):
         # Read the enhanced video into memory
         with open(temp_output_path, 'rb') as f:
             enhanced_video_bytes = f.read()
+        
+        enhanced_video_base64 = base64.b64encode(enhanced_video_bytes).decode('utf-8')
             
         # Prepare the result dictionary
         result = {
-            "enhanced_video": enhanced_video_bytes,
+            "enhanced_video": enhanced_video_base64,
             "ocr_results": processing_result.get('ocr_results', []),
             "processing_info": {
                 "frames_processed": processing_result.get('frames_processed', 0),
                 "processing_time": processing_result.get('processing_time', 0),
                 "input_resolution": processing_result.get('input_resolution', (0, 0)),
                 "output_resolution": processing_result.get('output_resolution', (0, 0)),
+                "model_used": model_key
             }
         }
         
@@ -269,18 +269,23 @@ def process_encrypted_video(encrypted_data):
 @app.route('/process_media', methods=['POST'])
 def process_media():
     """
-    Process encrypted media (image or video) and return enhanced result.
+    Process media (image or video) and return enhanced result.
     
     Expects JSON with:
     {
-        "encrypted_media": "<base64 RSA blob>",
-        "media_type": "image" or "video"
+        "media_data": "<base64 encoded media>",
+        "media_type": "image" or "video",
+        "model": "real-esrgan" or "real-hat-gan"
     }
     
     Returns JSON with:
     {
         "status": "success" or "error",
-        "encrypted_result": "<base64 RSA blob>" or
+        "result": {
+            "enhanced_image" or "enhanced_video": "<base64 encoded media>",
+            "ocr_results": [...],
+            "processing_info": {...}
+        } or
         "message": "error message"
     }
     """
@@ -293,42 +298,37 @@ def process_media():
     data = request.get_json()
     
     # Validate required fields
-    if 'encrypted_media' not in data or 'media_type' not in data:
+    if 'media_data' not in data or 'media_type' not in data:
         return jsonify({
             "status": "error", 
-            "message": "Request must contain 'encrypted_media' and 'media_type'"
+            "message": "Request must contain 'media_data' and 'media_type'"
         }), 400
     
-    encrypted_media = data['encrypted_media']
+    media_data = data['media_data']
     media_type = data['media_type'].lower()
+    model_key = data.get('model', 'real-esrgan')
+    
+    # Validate model selection
+    if model_key not in AVAILABLE_MODELS:
+        return jsonify({
+            "status": "error", 
+            "message": f"Invalid model selection: {model_key}. Available models: {', '.join(AVAILABLE_MODELS.keys())}"
+        }), 400
     
     # Process based on media type
     if media_type == 'image':
         try:
-            result = process_encrypted_image(encrypted_media)
+            result = process_image_data(media_data, model_key)
             
             if 'status' in result and result['status'] == 'error':
                 return jsonify(result), 500
                 
-            # Encrypt the result
-            encrypted_result = encryption_utils.encrypt_data(
-                json.dumps(
-                    {
-                        "enhanced_image": base64.b64encode(result["enhanced_image"]).decode('utf-8'),
-                        "original_ocr": result["original_ocr"],
-                        "enhanced_ocr": result["enhanced_ocr"],
-                        "processing_info": result["processing_info"]
-                    }
-                ).encode('utf-8'),
-                CLIENT_PUBLIC_KEY
-            )
-            
             processing_time = time.time() - start_time
-            logger.info(f"Image processed successfully in {processing_time:.2f}s")
+            logger.info(f"Image processed successfully in {processing_time:.2f}s using {model_key}")
             
             return jsonify({
                 "status": "success",
-                "encrypted_result": encrypted_result,
+                "result": result,
                 "processing_time": processing_time
             })
             
@@ -341,29 +341,17 @@ def process_media():
             
     elif media_type == 'video':
         try:
-            result = process_encrypted_video(encrypted_media)
+            result = process_video_data(media_data, model_key)
             
             if 'status' in result and result['status'] == 'error':
                 return jsonify(result), 500
                 
-            # Encrypt the result
-            encrypted_result = encryption_utils.encrypt_data(
-                json.dumps(
-                    {
-                        "enhanced_video": base64.b64encode(result["enhanced_video"]).decode('utf-8'),
-                        "ocr_results": result["ocr_results"],
-                        "processing_info": result["processing_info"]
-                    }
-                ).encode('utf-8'),
-                CLIENT_PUBLIC_KEY
-            )
-            
             processing_time = time.time() - start_time
-            logger.info(f"Video processed successfully in {processing_time:.2f}s")
+            logger.info(f"Video processed successfully in {processing_time:.2f}s using {model_key}")
             
             return jsonify({
                 "status": "success",
-                "encrypted_result": encrypted_result,
+                "result": result,
                 "processing_time": processing_time
             })
             
@@ -381,6 +369,17 @@ def process_media():
         }), 400
 
 
+@app.route('/models', methods=['GET'])
+def get_models():
+    """
+    Get information about available models.
+    """
+    return jsonify({
+        "status": "success",
+        "models": AVAILABLE_MODELS
+    })
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """
@@ -388,16 +387,48 @@ def health_check():
     """
     return jsonify({
         "status": "healthy",
-        "model_loaded": sr_model is not None,
-        "encryption_ready": os.path.exists(SERVER_PRIVATE_KEY) and os.path.exists(CLIENT_PUBLIC_KEY)
+        "models_loaded": {k: (v is not None) for k, v in sr_models.items()},
+        "available_models": list(AVAILABLE_MODELS.keys())
     })
 
 
-# Modify the bottom of your app.py file
+@app.route('/test_connection', methods=['GET', 'POST'])
+def test_connection():
+    """
+    Simple endpoint to test connectivity and CORS.
+    """
+    if request.method == 'POST':
+        try:
+            # Echo back any JSON data sent
+            if request.is_json:
+                data = request.get_json()
+                return jsonify({
+                    "status": "success",
+                    "message": "Connection successful!",
+                    "received_data": data
+                })
+            else:
+                return jsonify({
+                    "status": "success", 
+                    "message": "Connection successful, but no JSON data received."
+                })
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "message": f"Error processing request: {str(e)}"
+            }), 500
+    else:
+        # For GET requests
+        return jsonify({
+            "status": "success",
+            "message": "API is reachable!"
+        })
+
+
+# Entry point for application
 if __name__ == '__main__':
-    
-    # Initialize the super-resolution model
-    initialize_model()
+    # Initialize the super-resolution models
+    initialize_models()
     
     # Use environment variable for port if provided (for hosting platforms)
     port = int(os.environ.get('PORT', 5000))

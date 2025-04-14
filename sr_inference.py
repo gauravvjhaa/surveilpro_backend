@@ -1,400 +1,234 @@
 """
-Super-resolution inference for images and videos using PyTorch models.
+Super-resolution inference module.
 """
 
 import os
 import time
 import cv2
 import numpy as np
-import torch
-from typing import Optional, Dict, Any, Union, List, Tuple
-import logging
+from abc import ABC, abstractmethod
 
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-
-class SuperResolutionModel:
-    """
-    Base class for super-resolution models.
-    """
-    def __init__(self, model_path: str, device: str = None):
-        """
-        Initialize the super-resolution model.
-        
-        Args:
-            model_path: Path to the model file (.pth)
-            device: Device to run the model on ('cuda' or 'cpu')
-        """
+class SuperResolutionModel(ABC):
+    def __init__(self, model_path):
         self.model_path = model_path
-        
-        # Use CUDA if available and not explicitly set to CPU
-        if device is None:
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        else:
-            self.device = device
-            
-        logger.info(f"Using device: {self.device} for super-resolution")
-        
-        # Load the model
+        self.model = None
         self.load_model()
         
+    @abstractmethod
     def load_model(self):
-        """
-        Load the PyTorch model.
-        Must be implemented by subclasses.
-        """
-        raise NotImplementedError("Subclasses must implement load_model()")
+        pass
         
-    def preprocess(self, img: np.ndarray) -> torch.Tensor:
-        """
-        Preprocess the input image.
-        Must be implemented by subclasses.
+    @abstractmethod
+    def enhance(self, img, text_hint=None):
+        pass
         
-        Args:
-            img: Input image as numpy array (HWC, BGR)
-            
-        Returns:
-            Preprocessed tensor ready for the model
-        """
-        raise NotImplementedError("Subclasses must implement preprocess()")
+    def preprocess(self, img):
+        return img
         
-    def postprocess(self, output: torch.Tensor) -> np.ndarray:
-        """
-        Convert model output to final image.
-        Must be implemented by subclasses.
-        
-        Args:
-            output: Model output as tensor
-            
-        Returns:
-            Output image as numpy array (HWC, BGR)
-        """
-        raise NotImplementedError("Subclasses must implement postprocess()")
-        
-    def enhance(self, img: np.ndarray, text_hint: Optional[str] = None) -> np.ndarray:
-        """
-        Enhance an image using the super-resolution model.
-        
-        Args:
-            img: Input image as numpy array (HWC, BGR)
-            text_hint: Optional text hint from OCR
-            
-        Returns:
-            Enhanced image as numpy array (HWC, BGR)
-        """
-        # Preprocess the image
-        input_tensor = self.preprocess(img)
-        
-        # Move input to the correct device
-        input_tensor = input_tensor.to(self.device)
-        
-        # Forward pass
-        with torch.no_grad():
-            if text_hint is not None:
-                # If the model supports text hints, we would use it here
-                # This is a placeholder for future functionality
-                logger.info(f"Using text hint: {text_hint}")
-                output = self.model(input_tensor)
-            else:
-                output = self.model(input_tensor)
-        
-        # Postprocess and return
-        return self.postprocess(output)
+    def postprocess(self, output):
+        return output
 
 
 class RealESRGANModel(SuperResolutionModel):
-    """
-    Implementation for Real-ESRGAN model.
-    """
     def load_model(self):
-        """
-        Load the Real-ESRGAN model.
-        """
+        # Import libraries here to avoid dependency issues
         try:
             from basicsr.archs.rrdbnet_arch import RRDBNet
             from realesrgan import RealESRGANer
             
-            # Example parameters for RealESRGAN x4 model
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32)
             self.model = RealESRGANer(
                 scale=4,
                 model_path=self.model_path,
-                dni_weight=None,
-                model=RRDBNet(
-                    num_in_ch=3, num_out_ch=3, num_feat=64,
-                    num_block=23, num_grow_ch=32, scale=4
-                ),
-                tile=0,
+                model=model,
+                tile=400,
                 tile_pad=10,
                 pre_pad=0,
-                half=self.device == 'cuda'
+                half=True
             )
-            logger.info(f"Loaded Real-ESRGAN model from {self.model_path}")
+        except Exception as e:
+            print(f"Error loading RealESRGAN model: {e}")
+            self.model = None
+    
+    def enhance(self, img, text_hint=None):
+        if self.model is None:
+            # Fallback to basic upscaling
+            h, w = img.shape[:2]
+            return cv2.resize(img, (w*4, h*4), interpolation=cv2.INTER_CUBIC)
             
-        except ImportError:
-            raise ImportError(
-                "Real-ESRGAN dependencies not installed. "
-                "Install with: pip install realesrgan basicsr"
-            )
-            
-    def preprocess(self, img: np.ndarray) -> np.ndarray:
-        """
-        Preprocess for Real-ESRGAN model.
-        No preprocessing needed as RealESRGANer handles it.
-        """
-        # Real-ESRGAN expects BGR input, which OpenCV provides by default
-        return img
-        
-    def postprocess(self, output: np.ndarray) -> np.ndarray:
-        """
-        Post-process Real-ESRGAN output.
-        """
-        # Output is already in the right format (HWC, BGR)
-        return output
-        
-    def enhance(self, img: np.ndarray, text_hint: Optional[str] = None) -> np.ndarray:
-        """
-        Enhance an image using Real-ESRGAN model.
-        
-        Args:
-            img: Input image (HWC, BGR)
-            text_hint: Optional text hint from OCR (not used by Real-ESRGAN)
-            
-        Returns:
-            Enhanced image (HWC, BGR)
-        """
-        # Real-ESRGAN doesn't use text hints, but we log it for future
-        if text_hint:
-            logger.info(f"Text hint received: {text_hint} (not used by Real-ESRGAN)")
-            
-        # Process the image
-        output, _ = self.model.enhance(img, outscale=4)
-        
-        return output
+        # Process with RealESRGAN
+        try:
+            output, _ = self.model.enhance(img, outscale=4)
+            return output
+        except Exception as e:
+            print(f"Error in RealESRGAN enhancement: {e}")
+            # Fallback to basic upscaling
+            h, w = img.shape[:2]
+            return cv2.resize(img, (w*4, h*4), interpolation=cv2.INTER_CUBIC)
 
 
-class HATModel(SuperResolutionModel):
-    """
-    Implementation for HAT (Hybrid Attention Transformer) model.
-    """
+class RealHATGANModel(SuperResolutionModel):
     def load_model(self):
-        """
-        Load the HAT model.
-        """
-        # This is a placeholder for HAT model implementation
-        # In a real implementation, you'd import the specific HAT modules
-        logger.warning("HAT model is a placeholder - implement actual HAT model here")
-        
-        # Create a dummy model for demonstration
-        self.model = torch.nn.Sequential(
-            torch.nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            torch.nn.ReLU(),
-            torch.nn.Conv2d(64, 3, kernel_size=3, padding=1)
-        ).to(self.device)
-        
-    def preprocess(self, img: np.ndarray) -> torch.Tensor:
-        """
-        Preprocess for HAT model.
-        
-        Args:
-            img: Input image (HWC, BGR)
+        # Import libraries here to avoid dependency issues
+        try:
+            from basicsr.archs.hat_arch import HAT
+            from realesrgan import RealESRGANer
             
-        Returns:
-            Preprocessed tensor (NCHW, RGB)
-        """
-        # Convert BGR to RGB
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
-        # Normalize to [0, 1]
-        img_rgb = img_rgb.astype(np.float32) / 255.0
-        
-        # HWC to NCHW
-        img_tensor = torch.from_numpy(img_rgb).permute(2, 0, 1).unsqueeze(0)
-        
-        return img_tensor
-        
-    def postprocess(self, output: torch.Tensor) -> np.ndarray:
-        """
-        Post-process HAT model output.
-        
-        Args:
-            output: Model output tensor (NCHW, RGB)
+            # HAT model configuration (adjust as needed for your specific model)
+            model = HAT(
+                upscale=4,
+                in_chans=3,
+                img_size=64,
+                window_size=16,
+                depths=[6, 6, 6, 6],
+                embed_dim=180,
+                num_heads=[6, 6, 6, 6],
+                mlp_ratio=2
+            )
             
-        Returns:
-            Output image (HWC, BGR)
-        """
-        # NCHW to HWC
-        output = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
-        
-        # Clip to [0, 1]
-        output = np.clip(output, 0, 1)
-        
-        # Scale to [0, 255]
-        output = (output * 255.0).astype(np.uint8)
-        
-        # Convert RGB to BGR
-        output_bgr = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
-        
-        return output_bgr
+            self.model = RealESRGANer(
+                scale=4,
+                model_path=self.model_path,
+                model=model,
+                tile=400,
+                tile_pad=10,
+                pre_pad=0,
+                half=True
+            )
+        except Exception as e:
+            print(f"Error loading HAT model: {e}")
+            self.model = None
+    
+    def enhance(self, img, text_hint=None):
+        if self.model is None:
+            # Fallback to basic upscaling
+            h, w = img.shape[:2]
+            return cv2.resize(img, (w*4, h*4), interpolation=cv2.INTER_CUBIC)
+            
+        # Process with HAT model
+        try:
+            output, _ = self.model.enhance(img, outscale=4)
+            return output
+        except Exception as e:
+            print(f"Error in HAT enhancement: {e}")
+            # Fallback to basic upscaling
+            h, w = img.shape[:2]
+            return cv2.resize(img, (w*4, h*4), interpolation=cv2.INTER_CUBIC)
 
 
-def create_sr_model(model_type: str, model_path: str) -> SuperResolutionModel:
+def create_sr_model(model_type, model_path):
     """
-    Create a super-resolution model based on the model type.
+    Create a super-resolution model based on the specified type.
     
     Args:
-        model_type: Type of the model ('real-esrgan', 'hat')
+        model_type: Type of model to create ('real-esrgan', 'real-hat-gan')
         model_path: Path to the model file
         
     Returns:
-        Instantiated super-resolution model
+        Initialized super-resolution model
     """
-    if model_type.lower() == 'real-esrgan':
+    if model_type == 'real-esrgan':
         return RealESRGANModel(model_path)
-    elif model_type.lower() == 'hat':
-        return HATModel(model_path)
+    elif model_type == 'real-hat-gan':
+        return RealHATGANModel(model_path)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
 
 
-def process_image(
-    img: np.ndarray,
-    sr_model: SuperResolutionModel,
-    text_hint: Optional[str] = None
-) -> np.ndarray:
+def process_image(image, sr_model, text_hint=None):
     """
-    Process an image through the super-resolution model.
+    Process a single image with the super-resolution model.
     
     Args:
-        img: Input image (HWC, BGR)
+        image: Input image as numpy array
         sr_model: Super-resolution model instance
-        text_hint: Optional text hint from OCR
+        text_hint: Optional text hint for the model
         
     Returns:
-        Enhanced image (HWC, BGR)
+        Enhanced image as numpy array
     """
-    # Ensure the image is in the correct format
-    if len(img.shape) != 3 or img.shape[2] != 3:
-        raise ValueError("Input must be a BGR image with shape (H, W, 3)")
-        
-    # Apply super-resolution
-    enhanced_img = sr_model.enhance(img, text_hint)
-    
-    return enhanced_img
+    # Process with the model
+    return sr_model.enhance(image, text_hint)
 
 
-def process_video(
-    input_path: str,
-    output_path: str,
-    sr_model: SuperResolutionModel,
-    ocr_on_keyframes: bool = True,
-    keyframe_interval: int = 30
-) -> Dict[str, Any]:
+def process_video(input_path, output_path, sr_model, ocr_on_keyframes=True, keyframe_interval=30):
     """
-    Process a video through the super-resolution model.
+    Process a video with the super-resolution model.
     
     Args:
-        input_path: Path to input video
-        output_path: Path to save the output video
+        input_path: Path to input video file
+        output_path: Path to save the enhanced video
         sr_model: Super-resolution model instance
-        ocr_on_keyframes: Whether to run OCR on keyframes
+        ocr_on_keyframes: Whether to perform OCR on keyframes
         keyframe_interval: Interval between keyframes for OCR
         
     Returns:
-        Dictionary with processing results and metadata
+        Dictionary with processing results
     """
-    # Open the input video
-    cap = cv2.VideoCapture(input_path)
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video: {input_path}")
-        
-    # Get video properties
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    import cv2
+    from ocr_utils import extract_text_with_regions
     
-    # Calculate new dimensions (assuming 4x upscaling)
-    new_width = width * 4
-    new_height = height * 4
-    
-    # Create video writer
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (new_width, new_height))
-    
-    # Track OCR results if enabled
-    ocr_results = []
-    frame_count = 0
-    processing_time = 0
-    
-    logger.info(f"Processing video with {total_frames} frames at {fps} FPS")
     start_time = time.time()
     
+    # Open input video
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        raise ValueError(f"Failed to open video file: {input_path}")
+    
+    # Get video properties
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Create output video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width*4, height*4))
+    
+    ocr_results = []
+    frames_processed = 0
+    
     try:
+        # Process frames
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
                 
-            frame_start = time.time()
-                
-            # Process frame through super-resolution
-            enhanced_frame = process_image(frame, sr_model)
+            # Enhance the frame
+            enhanced_frame = sr_model.enhance(frame)
             
-            # Write the enhanced frame
-            out.write(enhanced_frame)
-            
-            # OCR on keyframes if enabled
-            if ocr_on_keyframes and frame_count % keyframe_interval == 0:
+            # Perform OCR on keyframes if requested
+            if ocr_on_keyframes and frames_processed % keyframe_interval == 0:
                 try:
-                    from ocr_utils import extract_text_from_image
-                    
-                    # Run OCR on the enhanced frame
-                    ocr_result = extract_text_from_image(enhanced_frame)
-                    
-                    if ocr_result['text']:
-                        ocr_results.append({
-                            'frame': frame_count,
-                            'timestamp': frame_count / fps,
-                            'text': ocr_result['text'],
-                            'confidence': ocr_result['confidence']
-                        })
-                        
-                except ImportError:
-                    logger.warning("OCR utilities not available, skipping OCR")
+                    ocr_result = extract_text_with_regions(enhanced_frame)
+                    ocr_results.append({
+                        "frame": frames_processed,
+                        "timestamp": frames_processed / fps,
+                        "text": ocr_result.get("text", ""),
+                        "confidence": ocr_result.get("confidence", 0),
+                    })
+                except Exception as e:
+                    print(f"Error performing OCR on frame {frames_processed}: {e}")
             
-            # Update progress
-            frame_time = time.time() - frame_start
-            processing_time += frame_time
-            frame_count += 1
+            # Write enhanced frame
+            out.write(enhanced_frame)
+            frames_processed += 1
             
-            if frame_count % 10 == 0:
-                elapsed = time.time() - start_time
-                frames_left = total_frames - frame_count
-                eta = (elapsed / frame_count) * frames_left if frame_count > 0 else 0
-                
-                logger.info(f"Processed {frame_count}/{total_frames} frames "
-                           f"({frame_count/total_frames*100:.1f}%) "
-                           f"ETA: {eta:.1f}s")
-                
-    except Exception as e:
-        logger.error(f"Error processing video: {e}")
+            # Print progress every 10 frames
+            if frames_processed % 10 == 0:
+                print(f"Processed {frames_processed}/{frame_count} frames")
+    finally:
+        # Release resources
         cap.release()
         out.release()
-        raise
-        
-    # Cleanup
-    cap.release()
-    out.release()
     
-    # Return processing statistics
+    processing_time = time.time() - start_time
+    
     return {
-        'frames_processed': frame_count,
-        'processing_time': processing_time,
-        'fps': frame_count / processing_time if processing_time > 0 else 0,
-        'ocr_results': ocr_results if ocr_on_keyframes else None,
-        'input_resolution': (width, height),
-        'output_resolution': (new_width, new_height)
+        "frames_processed": frames_processed,
+        "processing_time": processing_time,
+        "input_resolution": (width, height),
+        "output_resolution": (width*4, height*4),
+        "ocr_results": ocr_results
     }
