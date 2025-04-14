@@ -7,5 +7,5 @@ torch==2.0.1
 torchvision==0.15.2
 realesrgan==0.3.0
 pytesseract==0.3.10
-werkzeug==2.3.6
+werkzeug==2.3.7
 moviepy==1.0.3
