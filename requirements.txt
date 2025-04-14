@@ -9,3 +9,4 @@ pillow>=8.0.0
 realesrgan>=0.3.0
 basicsr>=1.4.0
 werkzeug>=2.0.0
+gunicorn>=20.0.4
