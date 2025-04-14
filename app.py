@@ -14,6 +14,7 @@ import cv2
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 import shutil
+from flask_cors import CORS
 
 # Import our custom modules
 import encryption_utils
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Configure constants
 MODEL_DIR = "model"
@@ -393,6 +395,7 @@ def health_check():
 
 # Modify the bottom of your app.py file
 if __name__ == '__main__':
+    
     # Initialize the super-resolution model
     initialize_model()
     
