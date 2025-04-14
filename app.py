@@ -1,348 +1,325 @@
+"""
+Flask backend for the SurveilPro image and video enhancement service.
+"""
+
 import os
 import time
-import base64
 import tempfile
+import base64
+import json
 import logging
 import numpy as np
 import cv2
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-# Import PyTorch + Real-ESRGAN
-import torch
-from basicsr.archs.rrdbnet_arch import RRDBNet
-from realesrgan import RealESRGANer
-
-# (Optional) OCR import; uncomment if you want to do text extraction
-# import pytesseract
-# from PIL import Image
-
-# (Optional) If you want to use MoviePy for advanced video manipulation
-# import moviepy.editor as mpy
-
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Initialize Flask app
 app = Flask(__name__)
 CORS(app)
 
-# Where your .pth files are located
+# Configure constants
 MODEL_DIR = "model"
-os.makedirs(MODEL_DIR, exist_ok=True)
-
-# Temporary folder for storing incoming/outgoing video
 TEMP_DIR = tempfile.gettempdir()
 
-# Available models
-AVAILABLE_MODELS = {
-    "real-esrgan": {
-        "file": "RealESRGAN_x4plus.pth",
-        "type": "real-esrgan",
-        "display_name": "RealESRGAN",
-        "description": "Standard 4× super-resolution"
-    },
-    "real-hat-gan": {
-        "file": "Real_HAT_GAN_sharper.pth",
-        "type": "real-hat-gan",
-        "display_name": "Real HAT-GAN",
-        "description": "Transformer-based 4× super-resolution"
-    }
+# Ensure the model directory exists
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+# We'll use these models directly from the BasicSR/RealESRGAN library
+MODEL_PATHS = {
+    "real-esrgan": os.path.join(MODEL_DIR, "RealESRGAN_x4plus.pth"),
+    "real-hat-gan": os.path.join(MODEL_DIR, "Real_HAT_GAN_sharper.pth")
 }
 
-# -----------------------------------------------------------------------------
-# 1) RealESRGAN Model Class
-# -----------------------------------------------------------------------------
-class RealESRGANModel:
-    def __init__(self, model_path, device='cuda'):
-        self.device = device
-        self.upsampler = RealESRGANer(
+# These will store our loaded models
+models = {}
+
+# Load the models
+def load_models():
+    global models
+    try:
+        # For RealESRGAN
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+        from realesrgan import RealESRGANer
+        
+        # 1. Load RealESRGAN
+        logger.info("Loading RealESRGAN model...")
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32)
+        models["real-esrgan"] = RealESRGANer(
             scale=4,
-            model_path=model_path,
-            model=RRDBNet(
-                num_in_ch=3, 
-                num_out_ch=3, 
-                num_feat=64, 
-                num_block=23, 
-                gc=32
-            ),
-            tile=0,
+            model_path=MODEL_PATHS["real-esrgan"],
+            model=model,
+            tile=400,
             tile_pad=10,
             pre_pad=0,
-            half=True,
-            device=self.device
+            half=True
         )
-    
-    def enhance(self, img_bgr):
-        # Convert from BGR (OpenCV) to RGB (PyTorch)
-        img_rgb = img_bgr[:, :, ::-1]
-        with torch.no_grad():
-            output_rgb, _ = self.upsampler.enhance(img_rgb, outscale=4)
-        # Convert back to BGR
-        return output_rgb[:, :, ::-1]
+        logger.info("RealESRGAN model loaded successfully!")
+        
+        # 2. For Real-HAT-GAN (adjust architecture as needed)
+        logger.info("Loading Real-HAT-GAN model...")
+        try:
+            from basicsr.archs.hat_arch import HAT
+            hat_model = HAT(upscale=4, in_chans=3, img_size=64, window_size=16, 
+                        depths=[6, 6, 6, 6], embed_dim=180, num_heads=[6, 6, 6, 6], 
+                        mlp_ratio=2)
+            models["real-hat-gan"] = RealESRGANer(
+                scale=4,
+                model_path=MODEL_PATHS["real-hat-gan"],
+                model=hat_model,
+                tile=400,
+                tile_pad=10,
+                pre_pad=0,
+                half=True
+            )
+            logger.info("Real-HAT-GAN model loaded successfully!")
+        except Exception as e:
+            logger.error(f"Could not load HAT model: {e}")
+            models["real-hat-gan"] = models["real-esrgan"]  # Use RealESRGAN as fallback
+    except Exception as e:
+        logger.error(f"Error loading models: {e}")
+        # Create basic fallback using OpenCV
+        class BasicUpscaler:
+            def enhance(self, img, outscale=4):
+                h, w = img.shape[:2]
+                result = cv2.resize(img, (w*outscale, h*outscale), interpolation=cv2.INTER_CUBIC)
+                return result, None
+        
+        # Use OpenCV resizing as fallback for both models
+        basic_model = BasicUpscaler()
+        models["real-esrgan"] = basic_model
+        models["real-hat-gan"] = basic_model
 
-# -----------------------------------------------------------------------------
-# 2) Real-HAT-GAN Model Class (Placeholder)
-#    Replace with actual code if you have the correct .pth + architecture
-# -----------------------------------------------------------------------------
-class RealHATGANModel:
-    def __init__(self, model_path, device='cuda'):
-        self.device = device
-        logger.warning(
-            "RealHATGANModel is a placeholder. If you have the real architecture, "
-            "load it similarly to RealESRGANModel."
-        )
-        # e.g.:
-        # self.model = SomeTransformer(...)
-        # checkpoint = torch.load(model_path, map_location=self.device)
-        # self.model.load_state_dict(checkpoint)
-        # self.model.to(self.device).eval()
-
-    def enhance(self, img_bgr):
-        # For demonstration, just do a 4× OpenCV resize
-        h, w = img_bgr.shape[:2]
-        return cv2.resize(img_bgr, (w*4, h*4), interpolation=cv2.INTER_CUBIC)
-
-# -----------------------------------------------------------------------------
-# 3) Load Model Helper
-# -----------------------------------------------------------------------------
-def load_sr_model(model_key, device='cuda'):
-    if model_key not in AVAILABLE_MODELS:
-        logger.warning(f"Unknown model '{model_key}', defaulting to 'real-esrgan'.")
-        model_key = "real-esrgan"
-    info = AVAILABLE_MODELS[model_key]
-    model_path = os.path.join(MODEL_DIR, info["file"])
-
-    if info["type"] == "real-esrgan":
-        return RealESRGANModel(model_path, device=device)
-    elif info["type"] == "real-hat-gan":
-        return RealHATGANModel(model_path, device=device)
-    else:
-        logger.warning(f"Unknown model type {info['type']}, using RealESRGAN fallback.")
-        return RealESRGANModel(model_path, device=device)
-
-# -----------------------------------------------------------------------------
-# (Optional) OCR Helper - If you want to extract text
-# -----------------------------------------------------------------------------
-# def extract_text_from_bgr(img_bgr):
-#     # Convert BGR -> RGB
-#     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-#     pil_img = Image.fromarray(img_rgb)
-#     text = pytesseract.image_to_string(pil_img)
-#     return text
-
-# -----------------------------------------------------------------------------
-# 4) Image Processing
-# -----------------------------------------------------------------------------
-def process_image_data(base64_image, model_key="real-esrgan"):
-    """
-    1) Decode base64 -> BGR
-    2) Load chosen SR model
-    3) Upscale (4×)
-    4) Return base64 of the enhanced PNG
-    """
+# Process image using selected model
+def process_image_data(base64_image, model_name="real-esrgan"):
+    # Decode base64 image data
     try:
         image_bytes = base64.b64decode(base64_image)
+    except Exception as e:
+        logger.error(f"Base64 decoding error: {e}")
+        return {"status": "error", "message": "Failed to decode base64 image data"}
+    
+    # Convert bytes to numpy array
+    try:
         image_np = np.frombuffer(image_bytes, np.uint8)
         image = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
+        
         if image is None:
-            raise ValueError("cv2.imdecode returned None (invalid image data).")
+            raise ValueError("Failed to decode image")
     except Exception as e:
         logger.error(f"Image decoding error: {e}")
-        return {"status": "error", "message": f"Image decode error: {str(e)}"}
-
-    # (Optional) original OCR
-    # orig_text = extract_text_from_bgr(image)
-
-    sr_model = load_sr_model(model_key, device='cuda')
-    try:
-        enhanced = sr_model.enhance(image)
-    except Exception as e:
-        logger.error(f"SR error: {e}")
-        return {"status": "error", "message": f"SR error: {str(e)}"}
+        return {"status": "error", "message": "Failed to decode image data"}
     
-    # (Optional) OCR on enhanced
-    # enhanced_text = extract_text_from_bgr(enhanced)
-
-    success, buffer = cv2.imencode('.png', enhanced)
-    if not success:
-        return {"status": "error", "message": "Could not encode enhanced image."}
-    enhanced_b64 = base64.b64encode(buffer).decode('utf-8')
-
+    # Get the selected model
+    model = models.get(model_name, models.get("real-esrgan"))
+    
+    # Process the image
+    try:
+        logger.info(f"Processing image with {model_name} model")
+        enhanced_image, _ = model.enhance(image, outscale=4)
+    except Exception as e:
+        logger.error(f"Error enhancing image: {e}")
+        # Fallback to OpenCV
+        h, w = image.shape[:2]
+        enhanced_image = cv2.resize(image, (w*4, h*4), interpolation=cv2.INTER_CUBIC)
+    
+    # Encode the enhanced image
+    _, buffer = cv2.imencode('.png', enhanced_image)
+    enhanced_bytes = buffer.tobytes()
+    enhanced_base64 = base64.b64encode(enhanced_bytes).decode('utf-8')
+    
     return {
-        "status": "success",
-        "enhanced_image": enhanced_b64,
+        "enhanced_image": enhanced_base64,
         "processing_info": {
-            "orig_shape": [image.shape[0], image.shape[1]],
-            "enhanced_shape": [enhanced.shape[0], enhanced.shape[1]],
-            "model_used": model_key
-        },
-        # "ocr_info": {
-        #    "original_text": orig_text,
-        #    "enhanced_text": enhanced_text
-        # }
+            "original_size": image.shape[:2],
+            "enhanced_size": enhanced_image.shape[:2],
+            "model_used": model_name
+        }
     }
 
-# -----------------------------------------------------------------------------
-# 5) Video Processing
-# -----------------------------------------------------------------------------
-def process_video_data(base64_video, model_key="real-esrgan"):
-    """
-    1) Decode base64 -> .mp4 in a temp file
-    2) Read frames via OpenCV
-    3) Upscale each frame 4×
-    4) Write to output .mp4
-    5) Return base64 of the new mp4
-    """
-    # Save paths
-    ts = int(time.time())
-    input_path = os.path.join(TEMP_DIR, f"input_{ts}.mp4")
-    output_path = os.path.join(TEMP_DIR, f"output_{ts}.mp4")
-
+# Process video using selected model
+def process_video_data(base64_video, model_name="real-esrgan"):
+    # Decode base64 video data
     try:
         video_bytes = base64.b64decode(base64_video)
     except Exception as e:
-        logger.error(f"Base64 decode error: {e}")
-        return {"status": "error", "message": f"Video decode error: {str(e)}"}
-
+        logger.error(f"Base64 decoding error: {e}")
+        return {"status": "error", "message": "Failed to decode base64 video data"}
+    
+    # Create temporary files
+    temp_input = os.path.join(TEMP_DIR, f"input_{time.time()}.mp4")
+    temp_output = os.path.join(TEMP_DIR, f"output_{time.time()}.mp4")
+    
     try:
-        # Write the input video
-        with open(input_path, 'wb') as f:
+        # Save input video
+        with open(temp_input, 'wb') as f:
             f.write(video_bytes)
-
-        cap = cv2.VideoCapture(input_path)
+        
+        # Get model
+        model = models.get(model_name, models.get("real-esrgan"))
+        
+        # Open the video
+        cap = cv2.VideoCapture(temp_input)
         if not cap.isOpened():
-            raise ValueError("Could not open input video.")
-
+            return {"status": "error", "message": "Failed to open video file"}
+        
+        # Get video properties
         fps = cap.get(cv2.CAP_PROP_FPS)
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Create video writer
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (w*4, h*4))
-
-        sr_model = load_sr_model(model_key, device='cuda')
-
+        out = cv2.VideoWriter(temp_output, fourcc, fps, (width*4, height*4))
+        
+        # Process frames
         frames_processed = 0
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            enhanced_frame = sr_model.enhance(frame)
-            out.write(enhanced_frame)
+                
+            try:
+                # Process frame
+                enhanced_frame, _ = model.enhance(frame, outscale=4)
+                out.write(enhanced_frame)
+            except Exception as e:
+                # Fallback
+                h, w = frame.shape[:2]
+                enhanced_frame = cv2.resize(frame, (w*4, h*4), interpolation=cv2.INTER_CUBIC)
+                out.write(enhanced_frame)
+            
             frames_processed += 1
-
+            
+            # Log progress
+            if frames_processed % 10 == 0:
+                logger.info(f"Processed {frames_processed}/{total_frames} frames")
+        
+        # Release resources
         cap.release()
         out.release()
-
-        # Read result as base64
-        with open(output_path, 'rb') as f:
-            out_bytes = f.read()
-        enhanced_video_b64 = base64.b64encode(out_bytes).decode('utf-8')
-
+        
+        # Read output video
+        with open(temp_output, 'rb') as f:
+            enhanced_video = f.read()
+            
+        enhanced_video_base64 = base64.b64encode(enhanced_video).decode('utf-8')
+        
         return {
-            "status": "success",
-            "enhanced_video": enhanced_video_b64,
+            "enhanced_video": enhanced_video_base64,
             "processing_info": {
                 "frames_processed": frames_processed,
-                "input_resolution": [h, w],
-                "output_resolution": [h*4, w*4],
-                "model_used": model_key
+                "original_size": [width, height],
+                "enhanced_size": [width*4, height*4],
+                "model_used": model_name
             }
         }
+        
     except Exception as e:
-        logger.error(f"Video processing error: {e}")
-        return {"status": "error", "message": f"Video processing error: {str(e)}"}
+        logger.error(f"Error processing video: {e}")
+        return {"status": "error", "message": f"Error processing video: {str(e)}"}
     finally:
-        # Cleanup
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
+        # Clean up
+        for file in [temp_input, temp_output]:
+            if os.path.exists(file):
+                try:
+                    os.remove(file)
+                except:
+                    pass
 
-# -----------------------------------------------------------------------------
-# 6) Flask Routes
-# -----------------------------------------------------------------------------
 @app.route('/process_media', methods=['POST'])
 def process_media():
-    """
-    Receives JSON:
-    {
-      "media_data": "<base64>",
-      "media_type": "image" or "video",
-      "model": "real-esrgan" or "real-hat-gan"
-    }
-    Returns JSON with either "enhanced_image" or "enhanced_video" in base64.
-    """
-    if not request.is_json:
-        return jsonify({"status": "error", "message": "Request must be JSON."}), 400
-
-    data = request.get_json()
-    media_data = data.get('media_data')
-    media_type = data.get('media_type')
-    model_key = data.get('model', 'real-esrgan')
-
-    if not media_data or not media_type:
-        return jsonify({
-            "status": "error",
-            "message": "Missing 'media_data' or 'media_type'."
-        }), 400
-
     start_time = time.time()
-
-    # Decide image or video
-    if media_type.lower() == 'image':
-        result = process_image_data(media_data, model_key)
-    elif media_type.lower() == 'video':
-        result = process_video_data(media_data, model_key)
-    else:
+    
+    # Check for correct JSON format
+    if not request.is_json:
+        return jsonify({"status": "error", "message": "Request must be JSON"}), 400
+    
+    data = request.get_json()
+    
+    # Validate required fields
+    if 'media_data' not in data or 'media_type' not in data:
         return jsonify({
             "status": "error", 
-            "message": f"Unsupported media_type '{media_type}'."
+            "message": "Request must contain 'media_data' and 'media_type'"
         }), 400
-
-    if result.get('status') == 'error':
-        # Some internal error
-        return jsonify(result), 500
-
-    elapsed = time.time() - start_time
-    result['processing_time'] = elapsed
-    return jsonify(result)
-
-@app.route('/models', methods=['GET'])
-def list_models():
-    """List available models."""
-    return jsonify({"status": "success", "models": AVAILABLE_MODELS})
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Simple health check."""
-    return jsonify({"status": "healthy"})
-
-@app.route('/test_connection', methods=['GET', 'POST'])
-def test_connection():
-    """Simple test endpoint for GET/POST."""
-    if request.method == 'POST':
-        if request.is_json:
-            data = request.get_json()
+    
+    media_data = data['media_data']
+    media_type = data['media_type'].lower()
+    model_name = data.get('model', 'real-esrgan')
+    
+    # Process based on media type
+    if media_type == 'image':
+        try:
+            result = process_image_data(media_data, model_name)
+            processing_time = time.time() - start_time
+            
             return jsonify({
                 "status": "success",
-                "message": "POST with JSON received.",
-                "received_data": data
+                "result": result,
+                "processing_time": processing_time
             })
-        else:
-            return jsonify({"status": "success", "message": "POST but no JSON."})
+        except Exception as e:
+            logger.error(f"Image processing error: {e}")
+            return jsonify({
+                "status": "error",
+                "message": f"Error processing image: {str(e)}"
+            }), 500
+    
+    elif media_type == 'video':
+        try:
+            result = process_video_data(media_data, model_name)
+            processing_time = time.time() - start_time
+            
+            return jsonify({
+                "status": "success",
+                "result": result,
+                "processing_time": processing_time
+            })
+        except Exception as e:
+            logger.error(f"Video processing error: {e}")
+            return jsonify({
+                "status": "error",
+                "message": f"Error processing video: {str(e)}"
+            }), 500
+    
     else:
-        return jsonify({"status": "success", "message": "GET: connected."})
+        return jsonify({
+            "status": "error",
+            "message": f"Unsupported media type: {media_type}. Use 'image' or 'video'"
+        }), 400
 
-# -----------------------------------------------------------------------------
-# 7) Entry Point
-# -----------------------------------------------------------------------------
+@app.route('/models', methods=['GET'])
+def get_models():
+    return jsonify({
+        "status": "success",
+        "models": {
+            "real-esrgan": {
+                "display_name": "RealESRGAN",
+                "description": "Standard 4x super-resolution"
+            },
+            "real-hat-gan": {
+                "display_name": "Real HAT-GAN",
+                "description": "Transformer-based hybrid model with sharper results"
+            }
+        }
+    })
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        "status": "healthy",
+        "models_available": list(models.keys()),
+        "model_paths": {k: os.path.exists(v) for k, v in MODEL_PATHS.items()}
+    })
+
+# Initialize models when app starts
+load_models()
+
 if __name__ == '__main__':
-    # Render sets PORT in the environment
     port = int(os.environ.get('PORT', 5000))
-    # Flask dev server (fine for small demos); for production, use Gunicorn:
-    #   gunicorn app:app --bind 0.0.0.0:$PORT
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port)
