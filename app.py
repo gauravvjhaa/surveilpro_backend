@@ -41,7 +41,36 @@ TEMP_DIR = tempfile.gettempdir()
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 # Ensure encryption keys are set up
-encryption_utils.ensure_keys_exist(KEYS_DIR)
+# Replace line 44 (the encryption_utils.ensure_keys_exist line) with this error handling code:
+
+# Add debugging information
+import sys
+print("Python path:", sys.path)
+print("Current directory:", os.getcwd())
+print("Directory contents:", os.listdir("."))
+if os.path.exists("encryption_utils.py"):
+    print("encryption_utils.py exists in current directory")
+    
+# Try to load the keys with error handling
+try:
+    print("Attempting to call ensure_keys_exist...")
+    print("Functions in encryption_utils:", [f for f in dir(encryption_utils) if not f.startswith('_')])
+    encryption_utils.ensure_keys_exist(KEYS_DIR)
+    print("Keys setup successful")
+except AttributeError as e:
+    print(f"Function not found: {e}")
+    print("Using fallback key check implementation")
+    os.makedirs(KEYS_DIR, exist_ok=True)
+    
+    # Just check if keys exist
+    server_private_key_path = os.path.join(KEYS_DIR, "server_private_key.pem")
+    server_public_key_path = os.path.join(KEYS_DIR, "server_public_key.pem")
+    client_private_key_path = os.path.join(KEYS_DIR, "client_private_key.pem")
+    client_public_key_path = os.path.join(KEYS_DIR, "client_public_key.pem")
+    
+    # Log status of key files
+    print(f"Server private key exists: {os.path.exists(server_private_key_path)}")
+    print(f"Client public key exists: {os.path.exists(client_public_key_path)}")
 
 # Global model instance
 sr_model = None
