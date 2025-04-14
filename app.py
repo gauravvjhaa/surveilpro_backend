@@ -362,9 +362,13 @@ def health_check():
     })
 
 
+# Modify the bottom of your app.py file
 if __name__ == '__main__':
     # Initialize the super-resolution model
     initialize_model()
     
-    # Start the Flask server
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # Use environment variable for port if provided (for hosting platforms)
+    port = int(os.environ.get('PORT', 5000))
+    
+    # In production, don't use debug mode
+    app.run(host='0.0.0.0', port=port, debug=False)
